@@ -413,6 +413,32 @@ if [[ "${SHOW_LLM_PROMPT:-true}" != false && "${RPROMPT:-}" != *'$(llm_prompt_in
   RPROMPT='$(llm_prompt_info)'"${RPROMPT:-}"
 fi
 
+# Powerlevel10k — CUSTOM_* helper.
+# p10k's _p9k_custom_prompt requires the first word of POWERLEVEL9K_CUSTOM_*
+# to be a function or an external command (it checks $+functions/$+commands).
+# Shell keywords such as [[ are not recognised and cause a silent bail.
+# This function is the correct entry point for the custom_llm_switcher element:
+#   typeset -g POWERLEVEL9K_CUSTOM_LLM_SWITCHER='_llm_p10k_custom'
+function _llm_p10k_custom() {
+  [[ -n "${LLM_PROFILES:-}" ]] || return
+  printf '%s' "${LLM_PROFILES//,/ }"
+}
+
+# Powerlevel10k — native segment (alternative approach).
+# If you prefer to use `llm_switcher` (no `custom_` prefix) in
+# POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS, p10k calls prompt_llm_switcher at render
+# time via `prompt_<name>` auto-discovery — no POWERLEVEL9K_CUSTOM_* needed.
+# This works because the check happens at render time (after all plugins load),
+# not at p10k's compile/init time.
+function prompt_llm_switcher() {
+  [[ -z "${LLM_PROFILES:-}" ]] && return
+  p10k segment -t "${LLM_PROFILES//,/ }"
+}
+
+# instant_prompt_* lets p10k render the segment during its instant-prompt
+# phase (before zsh has finished loading) without dropping into the slow path.
+function instant_prompt_llm_switcher() { prompt_llm_switcher; }
+
 # Tab completion - the _lsp file is autoloaded from $fpath.
 (( $+functions[compdef] )) && compdef _lsp lsp 2>/dev/null
 

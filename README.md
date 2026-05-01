@@ -268,6 +268,8 @@ The provider table above. Multiple providers can be set simultaneously.
 
 ## Prompt integration
 
+### Plain themes (`robbyrussell`, `agnoster`, …)
+
 `llm_prompt_info` is automatically added to `$RPROMPT`. With multiple slots
 active it shows:
 
@@ -283,6 +285,44 @@ ZSH_THEME_LLM_PROFILE_SUFFIX=""
 ```
 
 Disable entirely with `SHOW_LLM_PROMPT=false`.
+
+### Powerlevel10k
+
+p10k replaces `$RPROMPT` entirely, so the plain-theme injection above is
+invisible. Follow these steps to add a native p10k segment.
+
+**Step 1 — add the element name**
+
+Open `~/.p10k.zsh` and find `POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS`. Add
+`llm_switcher` wherever you want it to appear (after `aws` is a natural spot):
+
+```zsh
+typeset -g POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=(
+  ...
+  aws
+  llm_switcher          # ← add this line
+  ...
+)
+```
+
+**Step 2 — add styling** *(optional but recommended)*
+
+Anywhere inside the same file (e.g. near the `aws` styling block), add:
+
+```zsh
+typeset -g POWERLEVEL9K_LLM_SWITCHER_FOREGROUND=7
+typeset -g POWERLEVEL9K_LLM_SWITCHER_BACKGROUND=4
+typeset -g POWERLEVEL9K_LLM_SWITCHER_VISUAL_IDENTIFIER_EXPANSION='⚙'
+```
+
+**Step 3 — reload**
+
+```zsh
+source ~/.p10k.zsh
+```
+
+Or open a new terminal. The ⚙ segment will appear whenever at least one LLM
+slot is active, and disappear automatically when all slots are cleared.
 
 ---
 
