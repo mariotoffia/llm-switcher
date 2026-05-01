@@ -1,87 +1,119 @@
 # llm-switcher
 
-An [oh-my-zsh](https://ohmyz.sh/) plugin for switching between LLM provider
-accounts/profiles in the shell — in the same spirit as the built-in
-[aws plugin](https://github.com/ohmyzsh/ohmyzsh/tree/master/plugins/aws).
+An [oh-my-zsh](https://ohmyz.sh/) plugin for managing multiple LLM provider
+accounts in the shell — keep **GitHub Copilot, OpenAI, and one Claude account**
+all live at the same time, swap a single account when it runs out of tokens
+without disturbing the rest, and group your favourite combinations together.
+
+Modelled on the AWS [`asp`](https://github.com/ohmyzsh/ohmyzsh/tree/master/plugins/aws)
+plugin in spirit, but with a *per-provider slot* model rather than a single
+active profile.
 
 ---
 
-## Features
+## Install
 
-- Switch between named LLM profiles with a single short command (`lsp`)
-- **`lsp <profile> login`** — trigger the provider's auth flow in the current shell (sets the config directory, creates it if needed, then runs the login command)
-- **`lsp <profile> logout`** — run the provider's logout command against the right config directory
-- `config_dir` and `api_key` are both **first-class, independent** auth methods:
-  - `config_dir` only — directory-based auth (e.g. after `claude login`), the most common case
-  - `api_key` only — traditional key-based auth
-  - both — rare, but supported
-- Automatically sets the correct env var for each provider (`CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, etc.)
-- Supported providers: **openai**, **anthropic**, **google**, **mistral**, **ollama**, **custom**
-- Optional model and custom base-URL per profile
-- Prompt integration — shows the active profile (and model) in `$RPROMPT`
-- State persists across shell sessions (can be disabled)
-- Tab-completion for profile names
+One-liner — clones the plugin into `$ZSH_CUSTOM/plugins/llm-switcher`, probes
+your environment for installed CLIs / config dirs / API keys, and writes a
+ready-to-use `~/.llm-switcher` (chmod 600):
 
----
-
-## Installation
-
-### oh-my-zsh
-
-1. Clone this repository into your oh-my-zsh custom plugins directory:
-
-   ```zsh
-   git clone https://github.com/mariotoffia/llm-switcher \
-     ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/llm-switcher
-   ```
-
-2. Add `llm-switcher` to the plugins list in your `~/.zshrc`:
-
-   ```zsh
-   plugins=(... llm-switcher)
-   ```
-
-3. Reload your shell:
-
-   ```zsh
-   source ~/.zshrc
-   ```
-
----
-
-## Configuration
-
-Create `~/.llm-switcher` (INI-style, similar to `~/.aws/credentials`).
-Override the path with the `LLM_SWITCHER_CONFIG` environment variable.
-
-### Profile format
-
-```ini
-[profile_name]
-provider=<provider>              # required
-config_dir=~/.claude-work        # optional – directory-based auth (first-class)
-api_key=<your-api-key>           # optional – key-based auth (first-class)
-model=<model-name>               # optional
-base_url=<https://...>           # optional – override the default API endpoint
-config_dir_var=CLAUDE_CONFIG_DIR # optional – override which env var is set for config_dir
-login_cmd=claude login           # optional – override the login command
-logout_cmd=claude logout         # optional – override the logout command
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/mariotoffia/llm-switcher/main/install.sh)"
 ```
 
-> `config_dir` and `api_key` are fully independent. Use either one, both, or
-> neither (e.g. ollama needs neither).
+Then add `llm-switcher` to your `plugins=(...)` line in `~/.zshrc` (or pass
+`--modify-zshrc` to the installer to do it for you), and reload:
+
+```zsh
+source ~/.zshrc
+```
+
+If you want the installer to handle the `~/.zshrc` edit too:
+
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/mariotoffia/llm-switcher/main/install.sh)" -- --modify-zshrc
+```
+
+### Install-script flags
+
+| Flag | Effect |
+|---|---|
+| `--modify-zshrc` | Add `llm-switcher` to the `plugins=(...)` line in `~/.zshrc` (default: off; backs up the file first). |
+| `--force` | Overwrite an existing `~/.llm-switcher`. |
+| `--no-autoconfig` | Skip the auto-config probe; only install the plugin. |
+| `--autoconfig-only` | Skip the plugin install; only (re-)run the probe. Useful after installing a new CLI. |
+| `--plugins-dir DIR` | Install elsewhere than `$ZSH_CUSTOM/plugins`. |
+| `--config FILE` | Write the config somewhere else than `~/.llm-switcher`. |
+| `--repo URL` | Clone from a different fork. |
+
+### Auto-config: what gets detected
+
+For each provider, **any one** of: a known config directory, a CLI in `$PATH`, or
+a recognised API-key env var is enough to emit a profile. Detected sources are
+combined into one profile per provider — e.g. `~/.claude` *and* `claude` *and*
+`$ANTHROPIC_API_KEY` all roll up into one `[claude]` section.
+
+| Profile name | Triggers if any of these is present |
+|---|---|
+| `[claude]` | `~/.claude` directory · `claude` CLI · `$ANTHROPIC_API_KEY` |
+| `[codex]` | `~/.codex` directory · `codex` CLI · (uses `$OPENAI_API_KEY`) |
+| `[copilot]` | `~/.config/gh` or `~/.copilot` · `gh` CLI |
+| `[openai]` | `$OPENAI_API_KEY` (only if codex isn't already covering it) |
+| `[google]` | `$GOOGLE_API_KEY` or `$GEMINI_API_KEY` |
+| `[mistral]` | `$MISTRAL_API_KEY` |
+| `[ollama]` | `ollama` CLI · `$OLLAMA_HOST` |
+| `[groq]` | `$GROQ_API_KEY` |
+| `[xai]` | `$XAI_API_KEY` |
+| `[openrouter]` | `$OPENROUTER_API_KEY` |
+| `[deepseek]` | `$DEEPSEEK_API_KEY` |
+| `[perplexity]` | `$PERPLEXITY_API_KEY` |
+| `[cohere]` | `$COHERE_API_KEY` |
+
+A `[group:default]` group is also emitted, listing every detected profile, so
+`lsp default` activates them all in one go.
+
+### Manual install
+
+```zsh
+git clone https://github.com/mariotoffia/llm-switcher \
+  ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/llm-switcher
+# add `llm-switcher` to plugins=(...) in ~/.zshrc, then:
+source ~/.zshrc
+```
 
 ---
 
-## Usage
+## The slot model in 30 seconds
 
-### Directory-based auth (most common)
+Each provider has at most one active profile — its **slot**. Switching is:
 
-This is the typical workflow for tools like Claude Code that store credentials
-in a config directory after a `login` step — no API key required:
+- **Additive across providers** (default): swapping the `anthropic` slot from
+  `claude-work` to `claude-personal` leaves your `openai` and `copilot` slots
+  untouched.
+- **Replacing within a provider**: only one Claude account can be live at once
+  (env vars conflict by definition), so the new profile replaces the old one in
+  that slot.
+- **Optionally replacing across providers** via `mode=replace` in a profile or
+  `--replace` on the command line.
+
+---
+
+## The user's scenario, end-to-end
+
+You have GitHub Copilot, an OpenAI key, and two Claude Code accounts (work and
+personal). You want all three providers live at the same time, and you want to
+swap the Claude account when one runs out of tokens.
 
 ```ini
 # ~/.llm-switcher
+
+[copilot]
+provider=copilot
+config_dir=~/.config/gh
+
+[openai]
+provider=openai
+api_key=sk-...
 
 [claude-work]
 provider=anthropic
@@ -90,139 +122,152 @@ config_dir=~/.claude-work
 [claude-personal]
 provider=anthropic
 config_dir=~/.claude-personal
-
-[claude-oss]
-provider=anthropic
-config_dir=~/.claude-oss
 ```
 
 ```zsh
-# First time: run the login flow — this sets CLAUDE_CONFIG_DIR and calls
-# `claude login`, which stores credentials in ~/.claude-work.
-lsp claude-work login
+# First-time setup: log in once per directory-based profile.
+lsp copilot         login    # gh auth login against ~/.config/gh
+lsp claude-work     login    # claude login against ~/.claude-work
+lsp claude-personal login    # claude login against ~/.claude-personal
 
-# Later shells: just switch — credentials are already in the directory.
+# Daily use: activate all three in any order.
+lsp copilot
+lsp openai
 lsp claude-work
-lsp claude-personal
 
-# Sign out of a profile.
-lsp claude-work logout
-
-# See which profile is active.
+# Now GH_CONFIG_DIR, OPENAI_API_KEY, and CLAUDE_CONFIG_DIR are all set.
 lgp
+# anthropic: claude-work
+# copilot:   copilot
+# openai:    openai
 
-# List all profiles.
-llm_profiles
+# Tokens run out on the work Claude account.  Swap just that slot.
+lsp claude-personal
+# Copilot and OpenAI are untouched; only CLAUDE_CONFIG_DIR changed.
 
-# Clear the active profile (unsets all LLM_* env vars).
+# Need to log out of GitHub temporarily?
+lsp clear copilot
+# GH_CONFIG_DIR is gone; the others remain.
+
+# Take everything down at end of day:
 lsp
+# All slots cleared.
 ```
 
-### API-key-based auth
+---
+
+## Configuration
+
+The config file is `~/.llm-switcher` by default; override with
+`LLM_SWITCHER_CONFIG=path`.
+
+### Profile section
 
 ```ini
-[openai-dev]
-provider=openai
-api_key=sk-...
-model=gpt-4o
-
-[mistral-eu]
-provider=mistral
-api_key=...
-model=mistral-large-latest
+[profile_name]
+provider=<provider>              # required
+config_dir=~/.claude-work        # optional - directory-based auth
+api_key=<your-api-key>           # optional - key-based auth
+base_url=<https://...>           # optional - override default endpoint
+config_dir_var=CLAUDE_CONFIG_DIR # optional - override the env var name
+login_cmd=claude login           # optional - override the login command
+logout_cmd=claude logout         # optional - override the logout command
+mode=additive                    # optional - additive (default) | replace
 ```
 
-```zsh
-lsp openai-dev    # sets OPENAI_API_KEY, LLM_API_KEY, LLM_MODEL
-lsp mistral-eu    # sets MISTRAL_API_KEY, LLM_API_KEY, LLM_MODEL
-```
+`config_dir` and `api_key` are independent — use either, both, or neither.
 
-### Combined (directory + key)
+### Group section
+
+A *group* is a named bundle of profiles applied together.
 
 ```ini
-[claude-api]
-provider=anthropic
-api_key=sk-ant-...
-config_dir=~/.claude-api
-model=claude-opus-4-5
+[group:dev]
+members=copilot, openai, claude-work
+mode=replace                       # optional, group-wide default
+member.claude-work.mode=additive   # optional, per-member override
 ```
 
-Both `ANTHROPIC_API_KEY` and `CLAUDE_CONFIG_DIR` are set when you switch.
-
-### Local / self-hosted
-
-```ini
-[local-ollama]
-provider=ollama
-base_url=http://localhost:11434
-model=llama3
-
-[my-gateway]
-provider=custom
-api_key=secret
-base_url=https://my-llm-gateway.example.com/v1
-config_dir=/opt/gateway-config
-config_dir_var=MY_GATEWAY_CONFIG_DIR
-```
+`lsp dev` applies every member in order. With `mode=replace`, all current slots
+are cleared once before the first member is applied; subsequent members are
+additive (otherwise members would clobber each other within the group).
 
 ---
 
 ## Commands
 
 | Command | Description |
-|---------|-------------|
-| `lsp <profile>` | Switch to a profile (set env vars in the current shell) |
-| `lsp <profile> login` | Switch to profile, create `config_dir` if needed, run `login_cmd` |
-| `lsp <profile> logout` | Switch to profile, run `logout_cmd` |
-| `lsp` | Clear the current profile (unset all `LLM_*` vars) |
-| `lgp` | Print the active profile name |
-| `llm_profiles` | List all profiles defined in the config file |
+|---|---|
+| `lsp <profile>` | Switch the profile's provider slot (additive by default). |
+| `lsp <profile> --add` / `-a` | Force additive for this invocation. |
+| `lsp <profile> --replace` / `-r` | Clear every other slot first. |
+| `lsp <profile> login` | Switch + run `login_cmd` (creates `config_dir` if needed). |
+| `lsp <profile> logout` | Switch + run `logout_cmd`. |
+| `lsp <group>` | Apply every member of `[group:<name>]`. |
+| `lsp clear <provider>` | Clear only that provider's slot. |
+| `lsp` | Clear every slot. |
+| `lgp` | List every active slot, one per line: `<provider>: <profile>`. |
+| `llm_profiles` | List every profile and group in the config. |
 
-Tab-completion is available for profile names after `lsp`.
+> **Reserved names.** `clear`, `login`, and `logout` cannot be used as profile
+> or group names. The plugin warns if it spots one and refuses to apply it.
+
+---
+
+## Built-in providers
+
+| Provider | API-key env var | Default `config_dir_var` | Default `login_cmd` | Default `logout_cmd` |
+|---|---|---|---|---|
+| `openai` | `OPENAI_API_KEY` | — | — | — |
+| `anthropic` | `ANTHROPIC_API_KEY` | `CLAUDE_CONFIG_DIR` | `claude login` | `claude logout` |
+| `copilot` | — | `GH_CONFIG_DIR` | `gh auth login` | `gh auth logout` |
+| `codex` | `OPENAI_API_KEY` | `CODEX_HOME` | `codex login` | `codex logout` |
+| `google` | `GOOGLE_API_KEY` (+ `GEMINI_API_KEY`) | — | — | — |
+| `mistral` | `MISTRAL_API_KEY` | — | — | — |
+| `ollama` | — | — | — | — |
+| `groq` | `GROQ_API_KEY` | — | — | — |
+| `xai` | `XAI_API_KEY` | — | — | — |
+| `openrouter` | `OPENROUTER_API_KEY` | — | — | — |
+| `deepseek` | `DEEPSEEK_API_KEY` | — | — | — |
+| `perplexity` | `PERPLEXITY_API_KEY` | — | — | — |
+| `cohere` | `COHERE_API_KEY` | — | — | — |
+| `custom` | — | — | — | — |
+
+For `ollama`, set `base_url=` to export `OLLAMA_HOST`; otherwise the plugin
+leaves `OLLAMA_HOST` alone (the `ollama` CLI defaults to `http://localhost:11434`).
+
+For `custom`, supply your own `config_dir_var`, `login_cmd`, `logout_cmd` —
+useful for any provider not in the table above.
+
+> **Codex vs OpenAI:** both write `OPENAI_API_KEY`, so they share the same
+> physical env var. Activating a `[codex]` profile will overwrite the
+> `OPENAI_API_KEY` set by an `[openai]` profile (and vice versa). Pick whichever
+> matches the tool you're driving.
 
 ---
 
 ## Environment variables
 
-### Generic (always set)
+### Per-slot (set when a slot is active)
 
 | Variable | Value |
 |---|---|
-| `LLM_PROFILE` | Profile name |
-| `LLM_PROVIDER` | Provider name |
-| `LLM_API_KEY` | `api_key` value (when present) |
-| `LLM_MODEL` | `model` value (when present) |
-| `LLM_BASE_URL` | `base_url` value (when present) |
-| `LLM_CONFIG_DIR` | `config_dir` value, `~` expanded (when present) |
-| `LLM_CONFIG_DIR_VAR` | Name of the provider-specific env var set for `config_dir` (used internally for clean-up on profile switch) |
+| `LLM_PROFILE_<provider>` | Active profile name for this provider's slot. |
+| `LLM_PROFILES` | Comma-joined list of every active profile name. |
 
-### Provider-specific
+### Provider-specific (set when the slot's profile supplies them)
 
-| Provider | Variables set |
-|---|---|
-| `openai` | `OPENAI_API_KEY` |
-| `anthropic` | `ANTHROPIC_API_KEY` (key); `CLAUDE_CONFIG_DIR` (config_dir) |
-| `google` | `GOOGLE_API_KEY`, `GEMINI_API_KEY` |
-| `mistral` | `MISTRAL_API_KEY` |
-| `ollama` | `OLLAMA_HOST` (from `base_url`, default `http://localhost:11434`) |
-| `custom` | — (use `config_dir_var` to name your own) |
-
-### Provider defaults for login / logout commands
-
-| Provider | `login_cmd` default | `logout_cmd` default |
-|---|---|---|
-| `anthropic` | `claude login` | `claude logout` |
-| all others | *(must set explicitly)* | *(must set explicitly)* |
+The provider table above. Multiple providers can be set simultaneously.
 
 ---
 
 ## Prompt integration
 
-`llm_prompt_info` is automatically added to `$RPROMPT`. When a profile is
-active it displays:
+`llm_prompt_info` is automatically added to `$RPROMPT`. With multiple slots
+active it shows:
 
 ```
-<llm:claude-work> [claude-opus-4-5]
+<llm:openai,claude-work,copilot>
 ```
 
 Customise with these variables in your `~/.zshrc`:
@@ -230,32 +275,43 @@ Customise with these variables in your `~/.zshrc`:
 ```zsh
 ZSH_THEME_LLM_PROFILE_PREFIX="⚙ "
 ZSH_THEME_LLM_PROFILE_SUFFIX=""
-ZSH_THEME_LLM_MODEL_PREFIX=" ("
-ZSH_THEME_LLM_MODEL_SUFFIX=")"
-ZSH_THEME_LLM_DIVIDER=""
 ```
 
-Disable entirely:
-
-```zsh
-SHOW_LLM_PROMPT=false
-```
+Disable entirely with `SHOW_LLM_PROMPT=false`.
 
 ---
 
 ## State persistence
 
-By default the active profile is saved to `${TMPDIR:-/tmp}/.llm_current_profile_${UID}` and
-restored in every new shell — run `lsp` once and all future terminals inherit
-the same profile.
+Active slots are saved to `${TMPDIR:-/tmp}/.llm_current_profile_${UID}` and
+restored in every new shell. The format is one `SLOT_<provider>=<profile>` line
+per active slot.
 
 ```zsh
-# Store state in a permanent location (survives reboots):
+# Permanent location (survives reboots):
 LLM_STATE_FILE=~/.llm_current_profile
 
 # Disable persistence entirely:
 LLM_PROFILE_STATE_ENABLED=false
 ```
+
+---
+
+## Development
+
+```zsh
+make install     # run install.sh (clone/symlink + auto-config)
+make autoconfig  # re-run only the auto-config probe
+make test        # run the zsh test suite
+make lint        # syntax-check the plugin, tests, and install.sh
+make clean       # remove temp test artifacts
+```
+
+The test suite exercises the slot model end-to-end: per-provider sticky
+switching, `mode`/`--add`/`--replace`, groups with per-member overrides,
+state file round-trip across shell restart, all built-in providers (including
+the third-party ones), the reserved-name guard, and the install script's
+auto-config behaviour against a sandboxed `$HOME`.
 
 ---
 

@@ -1,82 +1,58 @@
-# llm-switcher - oh-my-zsh plugin for switching between LLM provider profiles
-# Inspired by the oh-my-zsh aws plugin
-#
-# Configuration file: ~/.llm-switcher (override with LLM_SWITCHER_CONFIG)
-#
-# Profile format (INI-style):
-#
-#   [profile_name]
-#   provider=openai|anthropic|google|mistral|ollama|custom
-#   api_key=your-api-key            (optional)
-#   config_dir=~/.claude-work       (optional, path to a tool config directory)
-#   config_dir_var=CLAUDE_CONFIG_DIR (optional, override default env var for config_dir)
-#   model=model-name                (optional)
-#   base_url=https://...            (optional, for custom or self-hosted endpoints)
-#   login_cmd=claude login          (optional, override the login command)
-#   logout_cmd=claude logout        (optional, override the logout command)
-#
-# api_key and config_dir are both optional and fully independent.  You can use:
-#   - only config_dir  (directory-based auth, e.g. after `lsp <profile> login`)
-#   - only api_key     (traditional key-based auth)
-#   - both             (rare, but supported)
-#   - neither          (valid for ollama and custom providers)
-#
-# Subcommand usage:
-#   lsp <profile>         - switch to profile (set env vars in current shell)
-#   lsp <profile> login   - switch to profile, create config_dir, run login_cmd
-#   lsp <profile> logout  - switch to profile, run logout_cmd
-#   lsp                   - clear current profile (unset all LLM_* vars)
-#
-# When config_dir is set the plugin exports the directory as an environment
-# variable so tools that store their auth in a directory (e.g. Claude Code
-# using CLAUDE_CONFIG_DIR) pick it up automatically in the current shell.
-#
-# Provider defaults for config_dir_var (when config_dir is set but
-# config_dir_var is not explicitly specified):
-#   anthropic -> CLAUDE_CONFIG_DIR
-#   (all other providers require an explicit config_dir_var)
-#
-# Provider defaults for login_cmd / logout_cmd (when not specified in profile):
-#   anthropic -> login: claude login   logout: claude logout
-#   (all other providers require explicit login_cmd / logout_cmd)
-#
-# Environment variables exported per provider:
-#   openai    -> OPENAI_API_KEY
-#   anthropic -> ANTHROPIC_API_KEY  (+ CLAUDE_CONFIG_DIR when config_dir is set)
-#   google    -> GOOGLE_API_KEY, GEMINI_API_KEY
-#   mistral   -> MISTRAL_API_KEY
-#   ollama    -> OLLAMA_HOST (uses base_url, defaults to http://localhost:11434)
-#   custom    -> no provider-specific variable; relies on LLM_API_KEY / LLM_BASE_URL
-#
-# Generic variables exported for every profile:
-#   LLM_PROFILE         - profile name
-#   LLM_PROVIDER        - provider name
-#   LLM_API_KEY         - api_key value (when present)
-#   LLM_MODEL           - model value (when present)
-#   LLM_BASE_URL        - base_url value (when present)
-#   LLM_CONFIG_DIR      - config_dir value, ~ expanded (when present)
-#   LLM_CONFIG_DIR_VAR  - name of the provider-specific env var set for config_dir
-#                         (tracked so it is cleanly unset when switching profiles)
+# llm-switcher - oh-my-zsh plugin for switching between LLM provider profiles.
+# Per-provider "slot" model: each provider has at most one active profile;
+# switching is additive by default.  See README.md for full usage.
 
-# ---------------------------------------------------------------------------
+# Provider table: api_key_var | config_dir_var | login_cmd | logout_cmd.
+typeset -gA _LLM_PROVIDERS=(
+  openai     'OPENAI_API_KEY|||'
+  anthropic  'ANTHROPIC_API_KEY|CLAUDE_CONFIG_DIR|claude login|claude logout'
+  google     'GOOGLE_API_KEY|||'
+  mistral    'MISTRAL_API_KEY|||'
+  ollama     '|||'
+  copilot    '|GH_CONFIG_DIR|gh auth login|gh auth logout'
+  codex      'OPENAI_API_KEY|CODEX_HOME|codex login|codex logout'
+  groq       'GROQ_API_KEY|||'
+  xai        'XAI_API_KEY|||'
+  openrouter 'OPENROUTER_API_KEY|||'
+  deepseek   'DEEPSEEK_API_KEY|||'
+  perplexity 'PERPLEXITY_API_KEY|||'
+  cohere     'COHERE_API_KEY|||'
+  custom     '|||'
+)
+
+# Active per-provider slot state (in-shell mirror of the state file).
+typeset -gA _LLM_SLOTS=()
+
+# Reserved tokens that can never be profile names.
+typeset -ga _LLM_RESERVED=(clear login logout)
+
 # Internal helpers
-# ---------------------------------------------------------------------------
 
-# Return the path to the active config file.
-function _llm_config_file() {
-  echo "${LLM_SWITCHER_CONFIG:-$HOME/.llm-switcher}"
+function _llm_config_file() { echo "${LLM_SWITCHER_CONFIG:-$HOME/.llm-switcher}"; }
+function _llm_state_file()  { echo "${LLM_STATE_FILE:-${TMPDIR:-/tmp}/.llm_current_profile_${UID}}"; }
+
+function _llm_expand_tilde() {
+  local path="$1"
+  [[ "$path" == '~'* ]] && path="${HOME}${path#\~}"
+  echo "$path"
 }
 
-# Read a key from a named section of an INI file.
-# Usage: _llm_ini_get <file> <section> <key>
+# _llm_provider_field <provider> <0..3>  - 0=key_var 1=cfg_var 2=login 3=logout
+function _llm_provider_field() {
+  local raw="${_LLM_PROVIDERS[$1]:-}"
+  [[ -z "$raw" ]] && return 1
+  local -a parts; parts=("${(@s/|/)raw}")
+  echo "${parts[$2+1]:-}"
+}
+
+# Read a key from a named INI section.
 function _llm_ini_get() {
   local file="$1" section="$2" key="$3"
   awk -F '=' -v section="$section" -v key="$key" '
     /^\[/ { in_section = ($0 == "[" section "]") }
-    in_section && /^[[:space:]]*[^#;]/ {
+    in_section && /^[[:space:]]*[^#;[:space:]]/ {
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
       if ($1 == key) {
-        # Rejoin value parts (handles values that themselves contain "=")
         val = ""
         for (i=2; i<=NF; i++) val = (i==2 ? "" : val "=") $i
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
@@ -87,376 +63,365 @@ function _llm_ini_get() {
   ' "$file"
 }
 
-# Expand a leading ~ in a path without using eval.
-function _llm_expand_tilde() {
-  local path="$1"
-  [[ "$path" == '~'* ]] && path="${HOME}${path#\~}"
-  echo "$path"
+# All [section] names from the config file.
+function _llm_ini_sections() {
+  local file="$1"
+  [[ -r "$file" ]] || return 1
+  grep --color=never -E '^\[[^][:space:]][^]]*\]$' "$file" | sed 's/^\[\(.*\)\]$/\1/'
 }
 
-# Return the default login command for a provider, or empty string if none.
-function _llm_default_login_cmd() {
-  case "$1" in
-    anthropic) echo "claude login" ;;
-    *)         echo "" ;;
-  esac
+# Is <name> a reserved token (clear/login/logout)?
+function _llm_is_reserved() {
+  local name="$1"
+  (( ${_LLM_RESERVED[(I)$name]} ))
 }
 
-# Return the default logout command for a provider, or empty string if none.
-function _llm_default_logout_cmd() {
-  case "$1" in
-    anthropic) echo "claude logout" ;;
-    *)         echo "" ;;
-  esac
-}
-
-# Apply all environment variables for a profile.
-# This is the single shared code path used by plain switch, login, and logout.
-# Usage: _llm_apply_profile <profile> <provider> <api_key> <model> <base_url> \
-#                            <config_dir> <config_dir_var>
-function _llm_apply_profile() {
-  local profile="$1"
-  local provider="$2"
-  local api_key="$3"
-  local model="$4"
-  local base_url="$5"
-  local config_dir="$6"
-  local config_dir_var="$7"
-
-  # Unset the provider-specific config-dir var that the *previous* profile set.
-  if [[ -n "${LLM_CONFIG_DIR_VAR:-}" ]]; then
-    unset "$LLM_CONFIG_DIR_VAR"
-  fi
-
-  export LLM_PROFILE="$profile"
-  export LLM_PROVIDER="$provider"
-
-  # API key (optional) -------------------------------------------------------
-  if [[ -n "$api_key" ]]; then
-    export LLM_API_KEY="$api_key"
-  else
-    unset LLM_API_KEY
-  fi
-
-  # Model (optional) ---------------------------------------------------------
-  if [[ -n "$model" ]]; then
-    export LLM_MODEL="$model"
-  else
-    unset LLM_MODEL
-  fi
-
-  # Base URL (optional) ------------------------------------------------------
-  if [[ -n "$base_url" ]]; then
-    export LLM_BASE_URL="$base_url"
-  else
-    unset LLM_BASE_URL
-  fi
-
-  # Config directory (optional, first-class) ---------------------------------
-  # Profiles that authenticate via a managed config directory (e.g. after
-  # `lsp <profile> login`) may supply config_dir with no api_key at all.
-  if [[ -n "$config_dir" ]]; then
-    local expanded_dir
-    expanded_dir="$(_llm_expand_tilde "$config_dir")"
-    export LLM_CONFIG_DIR="$expanded_dir"
-
-    # Resolve which provider-specific env var name to use.
-    if [[ -z "$config_dir_var" ]]; then
-      case "$provider" in
-        anthropic) config_dir_var="CLAUDE_CONFIG_DIR" ;;
-        *)         config_dir_var="" ;;
-      esac
-    fi
-
-    if [[ -n "$config_dir_var" ]]; then
-      export "$config_dir_var"="$expanded_dir"
-      export LLM_CONFIG_DIR_VAR="$config_dir_var"
-    else
-      unset LLM_CONFIG_DIR_VAR
-    fi
-  else
-    unset LLM_CONFIG_DIR LLM_CONFIG_DIR_VAR
-  fi
-
-  # Provider-specific API-key variables --------------------------------------
-  # Clear any stale vars from the previous profile first.
-  unset OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY MISTRAL_API_KEY OLLAMA_HOST
-
-  case "$provider" in
-    openai)
-      [[ -n "$api_key" ]] && export OPENAI_API_KEY="$api_key"
-      ;;
-    anthropic)
-      [[ -n "$api_key" ]] && export ANTHROPIC_API_KEY="$api_key"
-      ;;
-    google)
-      if [[ -n "$api_key" ]]; then
-        export GOOGLE_API_KEY="$api_key"
-        export GEMINI_API_KEY="$api_key"
-      fi
-      ;;
-    mistral)
-      [[ -n "$api_key" ]] && export MISTRAL_API_KEY="$api_key"
-      ;;
-    ollama)
-      export OLLAMA_HOST="${base_url:-http://localhost:11434}"
-      ;;
-    custom)
-      # No provider-specific variable; consumers rely on LLM_API_KEY / LLM_BASE_URL.
-      ;;
-    *)
-      echo "${fg[yellow]}Warning: unknown provider '$provider'. Only generic LLM_* variables will be set.${reset_color}" >&2
-      ;;
-  esac
-
-  _llm_update_state
-}
-
-# ---------------------------------------------------------------------------
-# Public functions
-# ---------------------------------------------------------------------------
-
-# lgp — print the name of the currently active LLM profile.
-function lgp() {
-  echo "${LLM_PROFILE:-}"
-}
-
-# llm_profiles — list all profile names defined in the config file.
+# llm_profiles - list every profile and group.  Groups get a "(group)" marker.
 function llm_profiles() {
   local config_file
   config_file="$(_llm_config_file)"
   [[ -r "$config_file" ]] || return 1
-  grep --color=never -E '^\[[^][:space:]][^]]*\]$' "$config_file" | sed 's/^\[\(.*\)\]$/\1/'
+  local section
+  while IFS= read -r section; do
+    if [[ "$section" == group:* ]]; then
+      echo "${section#group:} (group)"
+    else
+      if _llm_is_reserved "$section"; then
+        echo "${fg[yellow]:-}Warning: profile '$section' uses a reserved name and will be ignored. Rename it.${reset_color:-}" >&2
+      fi
+      echo "$section"
+    fi
+  done < <(_llm_ini_sections "$config_file")
 }
 
-# lsp [profile [login|logout]] — manage LLM profiles.
-#
-#   lsp                    clear current profile (unset all LLM_* vars)
-#   lsp <profile>          switch to profile
-#   lsp <profile> login    switch to profile and run its login command
-#   lsp <profile> logout   switch to profile and run its logout command
-#
-function lsp() {
-  # Use ${1:-} so calling lsp with no arguments is safe under zsh nounset.
-  if [[ -z "${1:-}" ]]; then
-    if [[ -n "${LLM_CONFIG_DIR_VAR:-}" ]]; then
-      unset "$LLM_CONFIG_DIR_VAR"
-    fi
-    unset LLM_PROFILE LLM_PROVIDER LLM_API_KEY LLM_MODEL LLM_BASE_URL
-    unset LLM_CONFIG_DIR LLM_CONFIG_DIR_VAR
-    unset OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY
-    unset MISTRAL_API_KEY OLLAMA_HOST
-    _llm_clear_state
-    echo "LLM profile cleared."
-    return
-  fi
-
-  local config_file
+# Names only (for completion / lookup), groups stripped of the marker.
+function _llm_all_names() {
+  local config_file section
   config_file="$(_llm_config_file)"
+  [[ -r "$config_file" ]] || return 1
+  while IFS= read -r section; do
+    [[ "$section" == group:* ]] && echo "${section#group:}" || echo "$section"
+  done < <(_llm_ini_sections "$config_file")
+}
 
-  if [[ ! -r "$config_file" ]]; then
-    echo "${fg[red]}Config file not found: $config_file${reset_color}" >&2
-    echo "Create it with at least one [profile] section. See README for details." >&2
-    return 1
-  fi
+# Slot apply / unset (the core of the per-provider model)
 
-  local -a available_profiles
-  available_profiles=($(llm_profiles))
+# Unset every env var owned by <provider>'s currently-active profile, and drop
+# the slot from _LLM_SLOTS.  Safe to call when the slot is empty.
+function _llm_unset_provider() {
+  local provider="$1"
+  local key_var cfg_var
+  key_var="$(_llm_provider_field "$provider" 0)"
+  cfg_var="$(_llm_provider_field "$provider" 1)"
 
-  if [[ -z "${available_profiles[(r)$1]}" ]]; then
-    echo "${fg[red]}Profile '$1' not found in '$config_file'${reset_color}" >&2
-    echo "Available profiles: ${(j:, :)available_profiles:-none}${reset_color}" >&2
-    return 1
-  fi
+  [[ -n "$key_var" ]] && unset "$key_var"
+  [[ -n "$cfg_var" ]] && unset "$cfg_var"
 
+  case "$provider" in
+    google) unset GEMINI_API_KEY ;;
+    ollama) unset OLLAMA_HOST    ;;
+  esac
+
+  unset "LLM_PROFILE_$provider"
+  unset "_LLM_SLOTS[$provider]"
+}
+
+# Apply one profile section into its provider's slot, replacing whatever was
+# there.  Other providers' slots are untouched.
+# Args: <profile_name>
+function _llm_apply_slot() {
   local profile="$1"
-  local subcommand="${2:-}"
-
-  local provider api_key model base_url config_dir config_dir_var login_cmd logout_cmd
-
-  provider="$(_llm_ini_get       "$config_file" "$profile" provider)"
-  api_key="$(_llm_ini_get        "$config_file" "$profile" api_key)"
-  model="$(_llm_ini_get          "$config_file" "$profile" model)"
-  base_url="$(_llm_ini_get       "$config_file" "$profile" base_url)"
-  config_dir="$(_llm_ini_get     "$config_file" "$profile" config_dir)"
-  config_dir_var="$(_llm_ini_get "$config_file" "$profile" config_dir_var)"
-  login_cmd="$(_llm_ini_get      "$config_file" "$profile" login_cmd)"
-  logout_cmd="$(_llm_ini_get     "$config_file" "$profile" logout_cmd)"
+  local config_file provider api_key base_url config_dir cfg_var_override
+  config_file="$(_llm_config_file)"
+  provider="$(_llm_ini_get        "$config_file" "$profile" provider)"
+  api_key="$(_llm_ini_get         "$config_file" "$profile" api_key)"
+  base_url="$(_llm_ini_get        "$config_file" "$profile" base_url)"
+  config_dir="$(_llm_ini_get      "$config_file" "$profile" config_dir)"
+  cfg_var_override="$(_llm_ini_get "$config_file" "$profile" config_dir_var)"
 
   if [[ -z "$provider" ]]; then
-    echo "${fg[yellow]}Warning: no 'provider' set for profile '$profile'. Defaulting to 'custom'.${reset_color}" >&2
+    print -u2 "${fg[yellow]:-}Warning: no 'provider' for profile '$profile'. Defaulting to 'custom'.${reset_color:-}"
     provider="custom"
   fi
+  if [[ -z "${_LLM_PROVIDERS[$provider]:-}" ]]; then
+    print -u2 "${fg[yellow]:-}Warning: unknown provider '$provider'. Only LLM_PROFILE_$provider will be set.${reset_color:-}"
+  fi
 
-  case "$subcommand" in
+  # Replace the slot: clear the previous occupant first.
+  _llm_unset_provider "$provider"
+  _LLM_SLOTS[$provider]="$profile"
+  export "LLM_PROFILE_$provider"="$profile"
 
-    # -- plain switch --------------------------------------------------------
-    "")
-      _llm_apply_profile "$profile" "$provider" "$api_key" "$model" \
-                         "$base_url" "$config_dir" "$config_dir_var"
-      echo "Switched to LLM profile: $profile (provider: $provider)"
-      ;;
+  # Provider-specific API-key var.
+  local key_var
+  key_var="$(_llm_provider_field "$provider" 0)"
+  if [[ -n "$key_var" && -n "$api_key" ]]; then
+    export "$key_var"="$api_key"
+  fi
+  # Google sets two env vars for the same key.
+  [[ "$provider" == google && -n "$api_key" ]] && export GEMINI_API_KEY="$api_key"
 
-    # -- login ---------------------------------------------------------------
-    login)
-      _llm_apply_profile "$profile" "$provider" "$api_key" "$model" \
-                         "$base_url" "$config_dir" "$config_dir_var"
-      echo "Switched to LLM profile: $profile (provider: $provider)"
+  # Provider-specific config-dir var.
+  if [[ -n "$config_dir" ]]; then
+    local expanded cfg_var
+    expanded="$(_llm_expand_tilde "$config_dir")"
+    cfg_var="${cfg_var_override:-$(_llm_provider_field "$provider" 1)}"
+    [[ -n "$cfg_var" ]] && export "$cfg_var"="$expanded"
+  fi
 
-      # Resolve the login command (profile override > provider default).
-      if [[ -z "$login_cmd" ]]; then
-        login_cmd="$(_llm_default_login_cmd "$provider")"
-      fi
-      if [[ -z "$login_cmd" ]]; then
-        echo "${fg[red]}No login_cmd configured for profile '$profile' (provider: $provider).${reset_color}" >&2
-        echo "Add 'login_cmd=<command>' to the [$profile] section of $config_file." >&2
-        return 1
-      fi
+  # ollama: OLLAMA_HOST is only set if the profile supplies an explicit
+  # base_url; the `ollama` CLI defaults to http://localhost:11434 on its own.
+  if [[ "$provider" == ollama && -n "$base_url" ]]; then
+    export OLLAMA_HOST="$base_url"
+  fi
 
-      # Ensure the config directory exists before the login command tries to
-      # write credentials into it.
-      if [[ -n "${LLM_CONFIG_DIR:-}" ]]; then
-        mkdir -p "$LLM_CONFIG_DIR"
-      fi
+  _llm_refresh_profiles_var
+  _llm_save_state
+}
 
-      echo "Running: $login_cmd"
-      # Use zsh word-splitting (${(z)...}) instead of eval to avoid interpreting
-      # shell metacharacters from the config file.  This safely handles quoted
-      # arguments (e.g. login_cmd=claude login) without injection risk.
-      local -a _login_parts
-      _login_parts=(${(z)login_cmd})
-      "${_login_parts[@]}"
-      ;;
+# Refresh the LLM_PROFILES summary var from the slot map.
+function _llm_refresh_profiles_var() {
+  local -a names
+  local p
+  for p in "${(@k)_LLM_SLOTS}"; do
+    names+=("${_LLM_SLOTS[$p]}")
+  done
+  if (( ${#names} )); then
+    export LLM_PROFILES="${(j:,:)names}"
+  else
+    unset LLM_PROFILES
+  fi
+}
 
-    # -- logout --------------------------------------------------------------
-    logout)
-      _llm_apply_profile "$profile" "$provider" "$api_key" "$model" \
-                         "$base_url" "$config_dir" "$config_dir_var"
+# Clear every slot.
+function _llm_clear_all_slots() {
+  local p
+  for p in "${(@k)_LLM_SLOTS}"; do
+    _llm_unset_provider "$p"
+  done
+  unset LLM_PROFILES
+  _llm_clear_state
+}
 
-      # Resolve the logout command (profile override > provider default).
-      if [[ -z "$logout_cmd" ]]; then
-        logout_cmd="$(_llm_default_logout_cmd "$provider")"
-      fi
-      if [[ -z "$logout_cmd" ]]; then
-        echo "${fg[red]}No logout_cmd configured for profile '$profile' (provider: $provider).${reset_color}" >&2
-        echo "Add 'logout_cmd=<command>' to the [$profile] section of $config_file." >&2
-        return 1
-      fi
-
-      echo "Running: $logout_cmd"
-      local -a _logout_parts
-      _logout_parts=(${(z)logout_cmd})
-      "${_logout_parts[@]}"
-      ;;
-
-    # -- unknown subcommand --------------------------------------------------
-    *)
-      echo "${fg[red]}Unknown subcommand: '$subcommand'. Valid subcommands: login, logout.${reset_color}" >&2
-      return 1
-      ;;
+# Resolve the effective mode (additive|replace) for a given switch.
+function _llm_resolve_mode() {
+  local profile="$1" cli_flag="$2"
+  case "$cli_flag" in
+    --add|-a)     echo additive; return ;;
+    --replace|-r) echo replace;  return ;;
   esac
+  local profile_mode
+  profile_mode="$(_llm_ini_get "$(_llm_config_file)" "$profile" mode)"
+  echo "${profile_mode:-additive}"
 }
 
-# ---------------------------------------------------------------------------
-# State persistence (survives new shell sessions)
-#
-# The state file uses KEY=VALUE lines (one per variable) so that values
-# containing spaces or special characters — such as directory paths — are
-# stored and restored correctly.
-# ---------------------------------------------------------------------------
+# State persistence: one SLOT_<provider>=<profile> line per active slot.
 
-function _llm_state_file() {
-  echo "${LLM_STATE_FILE:-${TMPDIR:-/tmp}/.llm_current_profile_${UID}}"
-}
-
-function _llm_update_state() {
+function _llm_save_state() {
   [[ "${LLM_PROFILE_STATE_ENABLED:-true}" == true ]] || return 0
-  local sf
+  local sf p
   sf="$(_llm_state_file)"
   [[ -d "$(dirname "$sf")" ]] || return 1
   {
-    printf 'LLM_PROFILE=%s\n'        "${LLM_PROFILE}"
-    printf 'LLM_PROVIDER=%s\n'       "${LLM_PROVIDER}"
-    printf 'LLM_MODEL=%s\n'          "${LLM_MODEL:-}"
-    printf 'LLM_BASE_URL=%s\n'       "${LLM_BASE_URL:-}"
-    printf 'LLM_API_KEY=%s\n'        "${LLM_API_KEY:-}"
-    printf 'LLM_CONFIG_DIR=%s\n'     "${LLM_CONFIG_DIR:-}"
-    printf 'LLM_CONFIG_DIR_VAR=%s\n' "${LLM_CONFIG_DIR_VAR:-}"
+    for p in "${(@k)_LLM_SLOTS}"; do
+      print "SLOT_$p=${_LLM_SLOTS[$p]}"
+    done
   } > "$sf"
 }
 
 function _llm_clear_state() {
   [[ "${LLM_PROFILE_STATE_ENABLED:-true}" == true ]] || return 0
-  local sf
-  sf="$(_llm_state_file)"
-  [[ -d "$(dirname "$sf")" ]] || return 1
-  : > "$sf"
+  rm -f "$(_llm_state_file)"
 }
 
-# ---------------------------------------------------------------------------
-# Prompt integration
-# ---------------------------------------------------------------------------
+# Restore slots from the state file (called once at plugin load).
+function _llm_restore_state() {
+  [[ "${LLM_PROFILE_STATE_ENABLED:-true}" == true ]] || return 0
+  local sf line key val
+  sf="$(_llm_state_file)"
+  [[ -s "$sf" ]] || return 0
+  # Slurp first: _llm_apply_slot rewrites the state file, which would truncate
+  # the inode the read loop is iterating over and swallow remaining slots.
+  local -a lines slot_profiles
+  lines=("${(@f)$(<"$sf")}")
+  for line in "${lines[@]}"; do
+    [[ -z "$line" ]] && continue
+    key="${line%%=*}"; val="${line#*=}"
+    [[ "$key" == SLOT_* && -n "$val" ]] && slot_profiles+=("$val")
+  done
+  local p
+  for p in "${slot_profiles[@]}"; do _llm_apply_slot "$p"; done
+}
 
-# llm_prompt_info — emit a short string suitable for inclusion in $PROMPT / $RPROMPT.
-function llm_prompt_info() {
-  [[ -z "${LLM_PROFILE:-}" ]] && return
+# Group resolution
 
-  local info
-  info="${ZSH_THEME_LLM_PROFILE_PREFIX:-<llm:}${LLM_PROFILE}${ZSH_THEME_LLM_PROFILE_SUFFIX:->}"
+# Apply a [group:name] section.  Resolves group-level + per-member modes.
+function _llm_apply_group() {
+  local group="$1" cli_flag="$2"
+  local config_file members_raw group_mode member_mode m
+  config_file="$(_llm_config_file)"
+  members_raw="$(_llm_ini_get "$config_file" "group:$group" members)"
+  if [[ -z "$members_raw" ]]; then
+    print -u2 "${fg[red]:-}Group '$group' has no 'members='.${reset_color:-}"
+    return 1
+  fi
+  group_mode="$(_llm_ini_get "$config_file" "group:$group" mode)"
+  group_mode="${group_mode:-additive}"
+  # CLI flag overrides group_mode for the *whole* group.
+  case "$cli_flag" in
+    --replace|-r) group_mode=replace ;;
+    --add|-a)     group_mode=additive ;;
+  esac
+  # If anything resolves to replace, apply once before the first member.
+  if [[ "$group_mode" == replace ]]; then
+    _llm_clear_all_slots
+  fi
+  # Split members on commas (with optional whitespace).
+  local -a members
+  members=("${(@s/,/)members_raw}")
+  for m in "${members[@]}"; do
+    m="${m## }"; m="${m%% }"     # trim
+    [[ -z "$m" ]] && continue
+    member_mode="$(_llm_ini_get "$config_file" "group:$group" "member.$m.mode")"
+    if [[ "$member_mode" == replace ]]; then
+      _llm_clear_all_slots
+    fi
+    _llm_apply_slot "$m"
+  done
+}
 
-  if [[ -n "${LLM_MODEL:-}" ]]; then
-    info+="${ZSH_THEME_LLM_DIVIDER:- }${ZSH_THEME_LLM_MODEL_PREFIX:-[}${LLM_MODEL}${ZSH_THEME_LLM_MODEL_SUFFIX:-]}"
+# Public functions
+
+# lgp - print all active slots, one per line: "<provider>: <profile>".
+function lgp() {
+  local p
+  for p in "${(@kon)_LLM_SLOTS}"; do
+    echo "$p: ${_LLM_SLOTS[$p]}"
+  done
+}
+
+# lsp - the main entry point.  See header comment for grammar.
+function lsp() {
+  if [[ -z "${1:-}" ]]; then
+    _llm_clear_all_slots
+    echo "All LLM slots cleared."
+    return
   fi
 
-  echo "$info"
+  local config_file
+  config_file="$(_llm_config_file)"
+  if [[ ! -r "$config_file" ]]; then
+    print -u2 "${fg[red]:-}Config file not found: $config_file${reset_color:-}"
+    print -u2 "Create it with at least one [profile] section. See README for details."
+    return 1
+  fi
+
+  # Reserved subcommand: clear <provider>
+  if [[ "$1" == clear ]]; then
+    if [[ -z "${2:-}" ]]; then
+      print -u2 "${fg[red]:-}lsp clear: missing provider name. Use bare 'lsp' to clear all slots.${reset_color:-}"
+      return 1
+    fi
+    if [[ -z "${_LLM_PROVIDERS[$2]:-}" ]]; then
+      print -u2 "${fg[red]:-}Unknown provider: '$2'. Known: ${(j:, :)${(@k)_LLM_PROVIDERS}}${reset_color:-}"
+      return 1
+    fi
+    _llm_unset_provider "$2"
+    _llm_refresh_profiles_var
+    _llm_save_state
+    echo "Cleared LLM slot: $2"
+    return
+  fi
+
+  # Resolve the section name (profile or group).
+  local target="$1" subcommand="${2:-}" cli_flag=""
+  # Subcommand can be login/logout (after a profile) or a mode flag.
+  case "$subcommand" in
+    --add|-a|--replace|-r) cli_flag="$subcommand"; subcommand="" ;;
+    login|logout|"")       ;;
+    *) print -u2 "${fg[red]:-}Unknown subcommand: '$subcommand'. Valid: login, logout, --add, --replace.${reset_color:-}"; return 1 ;;
+  esac
+
+  if _llm_is_reserved "$target"; then
+    print -u2 "${fg[red]:-}'$target' is a reserved name and cannot be a profile.${reset_color:-}"
+    return 1
+  fi
+
+  local config_file_sections
+  config_file_sections="$(_llm_ini_sections "$config_file")"
+  local is_group=0 is_profile=0
+  echo "$config_file_sections" | grep -qx "group:$target" && is_group=1
+  echo "$config_file_sections" | grep -qx "$target"       && is_profile=1
+
+  if (( ! is_group && ! is_profile )); then
+    local -a available; available=($(_llm_all_names))
+    print -u2 "${fg[red]:-}Profile '$target' not found in '$config_file'${reset_color:-}"
+    print -u2 "Available: ${(j:, :)available:-none}"
+    return 1
+  fi
+
+  if (( is_group )); then
+    _llm_apply_group "$target" "$cli_flag"
+    echo "Applied LLM group: $target"
+    return
+  fi
+
+  # Single profile.
+  local mode
+  mode="$(_llm_resolve_mode "$target" "$cli_flag")"
+  if [[ "$mode" == replace ]]; then
+    _llm_clear_all_slots
+  fi
+  _llm_apply_slot "$target"
+
+  local provider
+  provider="$(_llm_ini_get "$config_file" "$target" provider)"
+  echo "Switched to LLM profile: $target (provider: ${provider:-custom}, mode: $mode)"
+
+  # login / logout subcommands run after the slot is applied.
+  case "$subcommand" in
+    login|logout) _llm_run_auth_cmd "$target" "$subcommand" ;;
+  esac
+}
+
+# Run the configured login_cmd or logout_cmd for a profile.
+function _llm_run_auth_cmd() {
+  local profile="$1" action="$2"
+  local config_file provider config_dir field_idx cmd
+  config_file="$(_llm_config_file)"
+  provider="$(_llm_ini_get "$config_file" "$profile" provider)"
+  config_dir="$(_llm_ini_get "$config_file" "$profile" config_dir)"
+  cmd="$(_llm_ini_get "$config_file" "$profile" "${action}_cmd")"
+  if [[ -z "$cmd" ]]; then
+    [[ "$action" == login ]] && field_idx=2 || field_idx=3
+    cmd="$(_llm_provider_field "$provider" $field_idx)"
+  fi
+  if [[ -z "$cmd" ]]; then
+    print -u2 "${fg[red]:-}No ${action}_cmd configured for profile '$profile' (provider: $provider).${reset_color:-}"
+    print -u2 "Add '${action}_cmd=<command>' to the [$profile] section of $config_file."
+    return 1
+  fi
+  if [[ "$action" == login && -n "$config_dir" ]]; then
+    mkdir -p "$(_llm_expand_tilde "$config_dir")"
+  fi
+  echo "Running: $cmd"
+  local -a parts; parts=(${(z)cmd})
+  "${parts[@]}"
+}
+
+# Prompt integration
+
+function llm_prompt_info() {
+  [[ -z "${LLM_PROFILES:-}" ]] && return
+  echo "${ZSH_THEME_LLM_PROFILE_PREFIX:-<llm:}${LLM_PROFILES}${ZSH_THEME_LLM_PROFILE_SUFFIX:->}"
 }
 
 if [[ "${SHOW_LLM_PROMPT:-true}" != false && "${RPROMPT:-}" != *'$(llm_prompt_info)'* ]]; then
   RPROMPT='$(llm_prompt_info)'"${RPROMPT:-}"
 fi
 
-# ---------------------------------------------------------------------------
-# Tab completion
-# ---------------------------------------------------------------------------
+# Tab completion - the _lsp file is autoloaded from $fpath.
+(( $+functions[compdef] )) && compdef _lsp lsp 2>/dev/null
 
-function _llm_profiles() {
-  reply=($(llm_profiles))
-}
-compctl -K _llm_profiles lsp
-
-# ---------------------------------------------------------------------------
-# Restore state from previous session on shell start
-# ---------------------------------------------------------------------------
-
-if [[ "${LLM_PROFILE_STATE_ENABLED:-true}" == true ]]; then
-  local _llm_state_path
-  _llm_state_path="$(_llm_state_file)"
-  if [[ -s "$_llm_state_path" ]]; then
-    local _llm_key _llm_val _llm_line
-    while IFS= read -r _llm_line; do
-      [[ -z "$_llm_line" ]] && continue
-      _llm_key="${_llm_line%%=*}"
-      _llm_val="${_llm_line#*=}"
-      case "$_llm_key" in
-        LLM_PROFILE|LLM_PROVIDER|LLM_MODEL|LLM_BASE_URL|LLM_API_KEY|LLM_CONFIG_DIR|LLM_CONFIG_DIR_VAR)
-          [[ -n "$_llm_val" ]] && export "$_llm_key"="$_llm_val"
-          ;;
-      esac
-    done < "$_llm_state_path"
-
-    # Re-apply provider-specific API-key variable.
-    case "${LLM_PROVIDER:-}" in
-      openai)    [[ -n "${LLM_API_KEY:-}" ]] && export OPENAI_API_KEY="$LLM_API_KEY" ;;
-      anthropic) [[ -n "${LLM_API_KEY:-}" ]] && export ANTHROPIC_API_KEY="$LLM_API_KEY" ;;
-      google)    [[ -n "${LLM_API_KEY:-}" ]] && export GOOGLE_API_KEY="$LLM_API_KEY" && export GEMINI_API_KEY="$LLM_API_KEY" ;;
-      mistral)   [[ -n "${LLM_API_KEY:-}" ]] && export MISTRAL_API_KEY="$LLM_API_KEY" ;;
-      ollama)    export OLLAMA_HOST="${LLM_BASE_URL:-http://localhost:11434}" ;;
-    esac
-
-    # Re-apply the config-dir env var if one was saved.
-    if [[ -n "${LLM_CONFIG_DIR:-}" && -n "${LLM_CONFIG_DIR_VAR:-}" ]]; then
-      export "$LLM_CONFIG_DIR_VAR"="$LLM_CONFIG_DIR"
-    fi
-  fi
-  unset _llm_state_path _llm_key _llm_val _llm_line
-fi
+# Restore state from previous session
+_llm_restore_state
