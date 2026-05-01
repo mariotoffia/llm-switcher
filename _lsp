@@ -1,0 +1,62 @@
+#compdef lsp
+# zsh completion for llm-switcher's `lsp` command.
+#
+# Completes:
+#   lsp <TAB>                   profiles, groups, and `clear`
+#   lsp clear <TAB>             provider names
+#   lsp <profile> <TAB>         login | logout | --add | --replace
+#
+# Installed automatically when the plugin's directory is in $fpath
+# (oh-my-zsh adds custom plugin dirs by default).
+
+_lsp() {
+  local context state state_descr line
+  typeset -A opt_args
+
+  _arguments -C \
+    '1: :->first' \
+    '2: :->second' \
+    '*::: :->rest'
+
+  case "$state" in
+    first)
+      local -a profiles groups
+      if typeset -f _llm_all_names >/dev/null; then
+        local -a all_names
+        all_names=("${(@f)$(_llm_all_names 2>/dev/null)}")
+        local -a section_lines
+        section_lines=("${(@f)$(llm_profiles 2>/dev/null)}")
+        local n
+        for n in "${section_lines[@]}"; do
+          if [[ "$n" == *' (group)' ]]; then
+            groups+=("${n% (group)}")
+          else
+            profiles+=("$n")
+          fi
+        done
+      fi
+      _alternative \
+        'profiles:profile:compadd -a profiles' \
+        'groups:group:compadd -a groups' \
+        'subcommands:subcommand:(clear)'
+      ;;
+    second)
+      if [[ "${line[1]}" == clear ]]; then
+        # Complete provider names known to the plugin.
+        local -a providers
+        providers=("${(@k)_LLM_PROVIDERS}")
+        _describe -t providers 'provider' providers
+      else
+        _values 'subcommand' \
+          'login[run the profile login command]' \
+          'logout[run the profile logout command]' \
+          '--add[force additive switch]' \
+          '-a[force additive switch]' \
+          '--replace[clear other slots first]' \
+          '-r[clear other slots first]'
+      fi
+      ;;
+  esac
+}
+
+_lsp "$@"
