@@ -326,6 +326,33 @@ slot is active, and disappear automatically when all slots are cleared.
 
 ---
 
+## Using with IDEs (VS Code, Zed, …)
+
+> **CAUTION — environment variables are frozen at launch time.**
+> Running `lsp` in a terminal has no effect on an IDE that is already open.
+> The IDE inherited its environment when it started; switching profiles
+> afterwards is invisible to it and to any extension running inside it.
+
+The correct workflow when switching accounts for IDE use:
+
+```zsh
+# 1. Quit the IDE completely — Cmd+Q, not just closing the window.
+#    Unsaved work will be lost if you skip this step.
+
+# 2. Switch the profile in your terminal:
+lsp claude-company
+
+# 3. Launch the IDE from that same terminal so it inherits the new environment:
+code .     # VS Code
+zed .      # Zed
+```
+
+Launching from the terminal (step 3) is important. Opening the IDE from the
+Dock or Finder spawns it without your shell's active environment, so the
+profile switch is lost.
+
+---
+
 ## State persistence
 
 Active slots are saved to `${XDG_STATE_HOME:-$HOME/.local/state}/llm-switcher/state`
