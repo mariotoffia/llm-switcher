@@ -29,7 +29,7 @@ typeset -ga _LLM_RESERVED=(clear login logout)
 # Internal helpers
 
 function _llm_config_file() { echo "${LLM_SWITCHER_CONFIG:-$HOME/.llm-switcher}"; }
-function _llm_state_file()  { echo "${LLM_STATE_FILE:-${TMPDIR:-/tmp}/.llm_current_profile_${UID}}"; }
+function _llm_state_file()  { echo "${LLM_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/llm-switcher/state}"; }
 
 function _llm_expand_tilde() {
   local path="$1"
@@ -221,12 +221,13 @@ function _llm_save_state() {
   [[ "${LLM_PROFILE_STATE_ENABLED:-true}" == true ]] || return 0
   local sf p
   sf="$(_llm_state_file)"
-  [[ -d "$(dirname "$sf")" ]] || return 1
+  mkdir -p "$(dirname "$sf")" || return 1
   {
     for p in "${(@k)_LLM_SLOTS}"; do
       print "SLOT_$p=${_LLM_SLOTS[$p]}"
     done
   } > "$sf"
+  chmod 600 "$sf" 2>/dev/null
 }
 
 function _llm_clear_state() {
@@ -255,10 +256,11 @@ function _llm_restore_state() {
 
 # Group resolution
 
-# Apply a [group:name] section.  Resolves group-level + per-member modes.
+# Apply a [group:name] section.  Group mode=replace clears all slots once
+# before the first member; otherwise members are applied additively in order.
 function _llm_apply_group() {
   local group="$1" cli_flag="$2"
-  local config_file members_raw group_mode member_mode m
+  local config_file members_raw group_mode m
   config_file="$(_llm_config_file)"
   members_raw="$(_llm_ini_get "$config_file" "group:$group" members)"
   if [[ -z "$members_raw" ]]; then
@@ -267,25 +269,16 @@ function _llm_apply_group() {
   fi
   group_mode="$(_llm_ini_get "$config_file" "group:$group" mode)"
   group_mode="${group_mode:-additive}"
-  # CLI flag overrides group_mode for the *whole* group.
   case "$cli_flag" in
     --replace|-r) group_mode=replace ;;
     --add|-a)     group_mode=additive ;;
   esac
-  # If anything resolves to replace, apply once before the first member.
-  if [[ "$group_mode" == replace ]]; then
-    _llm_clear_all_slots
-  fi
-  # Split members on commas (with optional whitespace).
+  [[ "$group_mode" == replace ]] && _llm_clear_all_slots
   local -a members
   members=("${(@s/,/)members_raw}")
   for m in "${members[@]}"; do
-    m="${m## }"; m="${m%% }"     # trim
+    m="${m## }"; m="${m%% }"
     [[ -z "$m" ]] && continue
-    member_mode="$(_llm_ini_get "$config_file" "group:$group" "member.$m.mode")"
-    if [[ "$member_mode" == replace ]]; then
-      _llm_clear_all_slots
-    fi
     _llm_apply_slot "$m"
   done
 }

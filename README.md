@@ -179,18 +179,23 @@ mode=additive                    # optional - additive (default) | replace
 
 ### Group section
 
-A *group* is a named bundle of profiles applied together.
+A *group* is a named bundle of profiles applied together. `lsp <group>` is a
+macro for "run `lsp <name>` for each name in `members=`, in order".
 
 ```ini
 [group:dev]
 members=copilot, openai, claude-work
-mode=replace                       # optional, group-wide default
-member.claude-work.mode=additive   # optional, per-member override
+mode=replace                       # optional - default: additive
 ```
 
-`lsp dev` applies every member in order. With `mode=replace`, all current slots
-are cleared once before the first member is applied; subsequent members are
-additive (otherwise members would clobber each other within the group).
+- `mode=additive` (default) → each member is applied to its provider's slot,
+  leaving any pre-existing slots from other providers intact.
+- `mode=replace` → all current slots are cleared once before the first member
+  is applied; subsequent members are then applied additively (otherwise
+  members would clobber each other within the group).
+
+Members must be the names of regular `[profile]` sections elsewhere in the
+same config file.
 
 ---
 
@@ -283,15 +288,17 @@ Disable entirely with `SHOW_LLM_PROMPT=false`.
 
 ## State persistence
 
-Active slots are saved to `${TMPDIR:-/tmp}/.llm_current_profile_${UID}` and
-restored in every new shell. The format is one `SLOT_<provider>=<profile>` line
-per active slot.
+Active slots are saved to `${XDG_STATE_HOME:-$HOME/.local/state}/llm-switcher/state`
+and restored in every new shell. The parent directory is auto-created on first
+write and the file is chmod 600. Format is one `SLOT_<provider>=<profile>` line
+per slot — **profile names only**, no API keys or paths (those live in the config
+file).
 
 ```zsh
-# Permanent location (survives reboots):
-LLM_STATE_FILE=~/.llm_current_profile
+# Override location entirely:
+LLM_STATE_FILE=~/some/other/path
 
-# Disable persistence entirely:
+# Disable persistence:
 LLM_PROFILE_STATE_ENABLED=false
 ```
 
