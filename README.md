@@ -9,7 +9,13 @@ accounts/profiles in the shell — in the same spirit as the built-in
 ## Features
 
 - Switch between named LLM profiles with a single short command (`lsp`)
-- Automatically sets the correct API-key environment variable for each provider
+- **`lsp <profile> login`** — trigger the provider's auth flow in the current shell (sets the config directory, creates it if needed, then runs the login command)
+- **`lsp <profile> logout`** — run the provider's logout command against the right config directory
+- `config_dir` and `api_key` are both **first-class, independent** auth methods:
+  - `config_dir` only — directory-based auth (e.g. after `claude login`), the most common case
+  - `api_key` only — traditional key-based auth
+  - both — rare, but supported
+- Automatically sets the correct env var for each provider (`CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, etc.)
 - Supported providers: **openai**, **anthropic**, **google**, **mistral**, **ollama**, **custom**
 - Optional model and custom base-URL per profile
 - Prompt integration — shows the active profile (and model) in `$RPROMPT`
@@ -46,107 +52,180 @@ accounts/profiles in the shell — in the same spirit as the built-in
 ## Configuration
 
 Create `~/.llm-switcher` (INI-style, similar to `~/.aws/credentials`).
-A different path can be specified with the `LLM_SWITCHER_CONFIG` environment variable.
+Override the path with the `LLM_SWITCHER_CONFIG` environment variable.
 
 ### Profile format
 
 ```ini
 [profile_name]
-provider=<provider>         # required
-api_key=<your-api-key>      # required for all providers except ollama
-model=<model-name>          # optional
-base_url=<https://...>      # optional – override the default API endpoint
+provider=<provider>              # required
+config_dir=~/.claude-work        # optional – directory-based auth (first-class)
+api_key=<your-api-key>           # optional – key-based auth (first-class)
+model=<model-name>               # optional
+base_url=<https://...>           # optional – override the default API endpoint
+config_dir_var=CLAUDE_CONFIG_DIR # optional – override which env var is set for config_dir
+login_cmd=claude login           # optional – override the login command
+logout_cmd=claude logout         # optional – override the logout command
 ```
 
-### Example config
-
-```ini
-[openai-personal]
-provider=openai
-api_key=sk-...
-model=gpt-4o
-
-[claude-work]
-provider=anthropic
-api_key=sk-ant-...
-model=claude-opus-4-5
-
-[gemini-free]
-provider=google
-api_key=AIza...
-
-[mistral-eu]
-provider=mistral
-api_key=...
-model=mistral-large-latest
-
-[local-ollama]
-provider=ollama
-base_url=http://localhost:11434
-model=llama3
-
-[my-custom-llm]
-provider=custom
-api_key=secret
-base_url=https://my-llm-gateway.example.com/v1
-model=my-model
-```
-
-### Environment variables set per provider
-
-| Provider    | Variables set                                      |
-|-------------|---------------------------------------------------|
-| `openai`    | `OPENAI_API_KEY`                                   |
-| `anthropic` | `ANTHROPIC_API_KEY`                                |
-| `google`    | `GOOGLE_API_KEY`, `GEMINI_API_KEY`                 |
-| `mistral`   | `MISTRAL_API_KEY`                                  |
-| `ollama`    | `OLLAMA_HOST` (from `base_url`, default `http://localhost:11434`) |
-| `custom`    | —                                                  |
-
-In **all** cases the following generic variables are also set:
-
-| Variable      | Value                                           |
-|---------------|-------------------------------------------------|
-| `LLM_PROFILE` | Profile name                                    |
-| `LLM_PROVIDER`| Provider name                                   |
-| `LLM_API_KEY` | `api_key` value (unset for ollama)              |
-| `LLM_MODEL`   | `model` value (unset when not in profile)       |
-| `LLM_BASE_URL`| `base_url` value (unset when not in profile)    |
+> `config_dir` and `api_key` are fully independent. Use either one, both, or
+> neither (e.g. ollama needs neither).
 
 ---
 
 ## Usage
 
-### `lsp [profile]` — set / switch profile
+### Directory-based auth (most common)
+
+This is the typical workflow for tools like Claude Code that store credentials
+in a config directory after a `login` step — no API key required:
+
+```ini
+# ~/.llm-switcher
+
+[claude-work]
+provider=anthropic
+config_dir=~/.claude-work
+
+[claude-personal]
+provider=anthropic
+config_dir=~/.claude-personal
+
+[claude-oss]
+provider=anthropic
+config_dir=~/.claude-oss
+```
 
 ```zsh
-lsp openai-personal    # switch to the "openai-personal" profile
-lsp                    # clear the current profile (unsets all LLM_* vars)
+# First time: run the login flow — this sets CLAUDE_CONFIG_DIR and calls
+# `claude login`, which stores credentials in ~/.claude-work.
+lsp claude-work login
+
+# Later shells: just switch — credentials are already in the directory.
+lsp claude-work
+lsp claude-personal
+
+# Sign out of a profile.
+lsp claude-work logout
+
+# See which profile is active.
+lgp
+
+# List all profiles.
+llm_profiles
+
+# Clear the active profile (unsets all LLM_* env vars).
+lsp
 ```
 
-Tab-completion is available for profile names.
+### API-key-based auth
 
-### `lgp` — get current profile
+```ini
+[openai-dev]
+provider=openai
+api_key=sk-...
+model=gpt-4o
+
+[mistral-eu]
+provider=mistral
+api_key=...
+model=mistral-large-latest
+```
 
 ```zsh
-lgp                    # prints the active profile name (empty if none)
+lsp openai-dev    # sets OPENAI_API_KEY, LLM_API_KEY, LLM_MODEL
+lsp mistral-eu    # sets MISTRAL_API_KEY, LLM_API_KEY, LLM_MODEL
 ```
 
-### `llm_profiles` — list all profiles
+### Combined (directory + key)
 
-```zsh
-llm_profiles           # prints all profile names from the config file
+```ini
+[claude-api]
+provider=anthropic
+api_key=sk-ant-...
+config_dir=~/.claude-api
+model=claude-opus-4-5
 ```
 
-### `llm_prompt_info` — prompt helper
+Both `ANTHROPIC_API_KEY` and `CLAUDE_CONFIG_DIR` are set when you switch.
 
-Automatically added to `$RPROMPT`. When a profile is active it displays:
+### Local / self-hosted
+
+```ini
+[local-ollama]
+provider=ollama
+base_url=http://localhost:11434
+model=llama3
+
+[my-gateway]
+provider=custom
+api_key=secret
+base_url=https://my-llm-gateway.example.com/v1
+config_dir=/opt/gateway-config
+config_dir_var=MY_GATEWAY_CONFIG_DIR
+```
+
+---
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `lsp <profile>` | Switch to a profile (set env vars in the current shell) |
+| `lsp <profile> login` | Switch to profile, create `config_dir` if needed, run `login_cmd` |
+| `lsp <profile> logout` | Switch to profile, run `logout_cmd` |
+| `lsp` | Clear the current profile (unset all `LLM_*` vars) |
+| `lgp` | Print the active profile name |
+| `llm_profiles` | List all profiles defined in the config file |
+
+Tab-completion is available for profile names after `lsp`.
+
+---
+
+## Environment variables
+
+### Generic (always set)
+
+| Variable | Value |
+|---|---|
+| `LLM_PROFILE` | Profile name |
+| `LLM_PROVIDER` | Provider name |
+| `LLM_API_KEY` | `api_key` value (when present) |
+| `LLM_MODEL` | `model` value (when present) |
+| `LLM_BASE_URL` | `base_url` value (when present) |
+| `LLM_CONFIG_DIR` | `config_dir` value, `~` expanded (when present) |
+| `LLM_CONFIG_DIR_VAR` | Name of the provider-specific env var set for `config_dir` (used internally for clean-up on profile switch) |
+
+### Provider-specific
+
+| Provider | Variables set |
+|---|---|
+| `openai` | `OPENAI_API_KEY` |
+| `anthropic` | `ANTHROPIC_API_KEY` (key); `CLAUDE_CONFIG_DIR` (config_dir) |
+| `google` | `GOOGLE_API_KEY`, `GEMINI_API_KEY` |
+| `mistral` | `MISTRAL_API_KEY` |
+| `ollama` | `OLLAMA_HOST` (from `base_url`, default `http://localhost:11434`) |
+| `custom` | — (use `config_dir_var` to name your own) |
+
+### Provider defaults for login / logout commands
+
+| Provider | `login_cmd` default | `logout_cmd` default |
+|---|---|---|
+| `anthropic` | `claude login` | `claude logout` |
+| all others | *(must set explicitly)* | *(must set explicitly)* |
+
+---
+
+## Prompt integration
+
+`llm_prompt_info` is automatically added to `$RPROMPT`. When a profile is
+active it displays:
 
 ```
-<llm:openai-personal> [gpt-4o]
+<llm:claude-work> [claude-opus-4-5]
 ```
 
-You can customise the appearance with these variables in your `~/.zshrc`:
+Customise with these variables in your `~/.zshrc`:
 
 ```zsh
 ZSH_THEME_LLM_PROFILE_PREFIX="⚙ "
@@ -156,7 +235,7 @@ ZSH_THEME_LLM_MODEL_SUFFIX=")"
 ZSH_THEME_LLM_DIVIDER=""
 ```
 
-To disable the prompt addition entirely:
+Disable entirely:
 
 ```zsh
 SHOW_LLM_PROMPT=false
@@ -166,19 +245,15 @@ SHOW_LLM_PROMPT=false
 
 ## State persistence
 
-By default the active profile is saved to `/tmp/.llm_current_profile` and
-restored automatically in every new shell. This means you only need to run
-`lsp` once and all future terminals will inherit the same profile.
-
-Override the state-file path:
+By default the active profile is saved to `${TMPDIR:-/tmp}/.llm_current_profile_${UID}` and
+restored in every new shell — run `lsp` once and all future terminals inherit
+the same profile.
 
 ```zsh
-LLM_STATE_FILE=~/.llm_current_profile   # survives reboots
-```
+# Store state in a permanent location (survives reboots):
+LLM_STATE_FILE=~/.llm_current_profile
 
-Disable persistence entirely:
-
-```zsh
+# Disable persistence entirely:
 LLM_PROFILE_STATE_ENABLED=false
 ```
 
